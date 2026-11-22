@@ -22,6 +22,10 @@
 #include <QTimer>
 #include <QSettings>
 #include <QPlainTextEdit>
+#include <QLabel>
+#include <QComboBox>
+#include <QGroupBox>
+#include <QPushButton>
 #include <unistd.h>
 #include "qhexedit.h"
 #include "dialogsp.h"
@@ -101,6 +105,16 @@ private:
     int m_lastVerdict;
     bool m_haveDetect;
 
+    // chip family + adapter
+    QComboBox *m_chiptype;
+    QGroupBox *m_adapterGroup;
+    QComboBox *m_adapter;
+    QLabel *m_adapterInfo;
+    QPushButton *m_adapterCheck;
+    QLabel *m_infoAdapter;
+    QLabel *m_infoFamily;
+    QString m_family;
+
     // async operation state
     QTimer *m_eraseTimer;
     int m_eraseTicks;
@@ -161,6 +175,12 @@ private:
     void applyPinStates(int verdict);
     void setSignal(QLabel *lbl, const QString &state, const char *color);
     QString jedecManufName(unsigned char man);
+
+    void populateChipFamilies();
+    void rebuildManufacturers();
+    void updateAdapterInfo();
+    void doAdapterCheck();
+    QString adapterVoltage() const;
 };
 
 #endif // MAINWINDOW_H

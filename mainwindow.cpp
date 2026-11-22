@@ -22,6 +22,8 @@
 #include <QLineEdit>
 #include <QLabel>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFormLayout>
 #include <QMessageBox>
 #include <QButtonGroup>
 #include <QDragEnterEvent>
@@ -73,6 +75,14 @@ MainWindow::MainWindow(QWidget *parent) :
     m_eraseTimer = nullptr;
     m_lastVerdict = -1;
     m_haveDetect = false;
+    m_chiptype = nullptr;
+    m_adapterGroup = nullptr;
+    m_adapter = nullptr;
+    m_adapterInfo = nullptr;
+    m_adapterCheck = nullptr;
+    m_infoAdapter = nullptr;
+    m_infoFamily = nullptr;
+    m_family = "All";
     hexEdit = nullptr;
     currentChipSize = 0;
     currentNumBlocks = 0;
@@ -140,6 +150,51 @@ MainWindow::MainWindow(QWidget *parent) :
     ui->comboBox_size->addItem("64 M", 65536 * 1024);
 
     ui->comboBox_fill->addItems({"00 (zeros)", "FF (blank)", "Custom"});
+
+    // ---- chip family filter (inserted into the Chip form) ----
+    m_chiptype = new QComboBox(ui->groupBox);
+    m_chiptype->setToolTip("Filter the chip database by chip series");
+    if (auto *cf = qobject_cast<QFormLayout *>(ui->groupBox->layout()))
+        cf->insertRow(1, new QLabel("Family", ui->groupBox), m_chiptype);
+    connect(m_chiptype, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        if (m_settings) m_settings->setValue("family", m_chiptype->currentData().toString());
+        rebuildManufacturers();
+    });
+
+    // ---- Chip Info: family + adapter rows ----
+    if (auto *inf = qobject_cast<QFormLayout *>(ui->infoForm))
+    {
+        m_infoFamily = new QLabel("-");
+        m_infoAdapter = new QLabel("-");
+        inf->insertRow(0, new QLabel("Family"), m_infoFamily);
+        inf->insertRow(1, new QLabel("Adapter"), m_infoAdapter);
+    }
+
+    // ---- adapter panel (inserted into the programmer top row) ----
+    m_adapterGroup = new QGroupBox("Adapter", this);
+    {
+        QVBoxLayout *ag = new QVBoxLayout(m_adapterGroup);
+        m_adapter = new QComboBox(m_adapterGroup);
+        m_adapterInfo = new QLabel(m_adapterGroup);
+        m_adapterInfo->setWordWrap(true);
+        m_adapterCheck = new QPushButton("Detect adapter / voltage", m_adapterGroup);
+        ag->addWidget(m_adapter);
+        ag->addWidget(m_adapterInfo, 1);
+        ag->addWidget(m_adapterCheck);
+    }
+    if (auto *top = qobject_cast<QHBoxLayout *>(ui->programmerTopLayout))
+        top->addWidget(m_adapterGroup);
+    m_adapter->addItem("Direct 3.3 V (no adapter)", "3.3");
+    m_adapter->addItem("1.8 V level adapter", "1.8");
+    m_adapter->addItem("2.5 V level adapter", "2.5");
+    m_adapter->addItem("1.2 V level adapter", "1.2");
+    m_adapter->addItem("SOIC-8 / SOP-8 test clip", "clip8");
+    m_adapter->addItem("SOIC-16 / SOP-16 test clip", "clip16");
+    m_adapter->addItem("DIP-8 ZIF socket", "dip8");
+    m_adapter->addItem("WSON-8 / DFN-8 adapter", "wson8");
+    connect(m_adapter, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { updateAdapterInfo(); });
+    connect(m_adapterCheck, &QPushButton::clicked, this, &MainWindow::doAdapterCheck);
+    updateAdapterInfo();
 
     // navigation, theme, tool buttons
     connect(ui->btnNavProgrammer, &QPushButton::clicked, this, [this]() { navTo(0); });
@@ -326,6 +381,17 @@ MainWindow::MainWindow(QWidget *parent) :
     ui->comboBox_man->setCurrentIndex(0);
     ui->comboBox_man->blockSignals(false);
     appendLog(QString("Loaded %1 chips from database").arg(max_rec));
+    populateChipFamilies();
+    if (m_chiptype)
+    {
+        int fi = m_chiptype->findData(m_settings->value("family").toString());
+        if (fi > 0) m_chiptype->setCurrentIndex(fi);
+    }
+    if (m_adapter)
+    {
+        int ai = m_adapter->findData(m_settings->value("adapter", "3.3").toString());
+        if (ai >= 0) m_adapter->setCurrentIndex(ai);
+    }
 
     // restore window geometry + theme
     QByteArray geo = m_settings->value("geometry").toByteArray();
@@ -1026,12 +1092,14 @@ void MainWindow::on_comboBox_man_currentIndexChanged(int index)
     QString txt="";
     if (max_rec > 0)
     {
+       QString famKey = m_chiptype ? m_chiptype->currentData().toString() : QString();
        txt = ui->comboBox_man->currentText().toUtf8();
        ui->comboBox_name->clear();
        ui->comboBox_name->addItem("");
        for (i = 0; i<max_rec; i++)
        {
-           if (txt.compare(chips[i].chipManuf)==0)
+           if ((txt.compare(chips[i].chipManuf)==0)
+               && (famKey.isEmpty() || chips[i].chipTypeTxt.trimmed()==famKey))
            {
            index2 = ui->comboBox_name->findText(chips[i].chipName);
                     if ( index2 == -1 ) ui->comboBox_name->addItem(chips[i].chipName);
@@ -1781,6 +1849,191 @@ void MainWindow::updateChipInfoPage()
     ui->lblInfoAlg->setText(alg);
     ui->lblInfoDelay->setText(dly);
     ui->lblInfoEeprom->setText(eep);
+    if (!type.isEmpty() && type != "-")
+        ui->lineEdit_type->setText(type);
+    if (m_infoFamily)  m_infoFamily->setText(m_chiptype ? m_chiptype->currentText() : "-");
+    if (m_infoAdapter) m_infoAdapter->setText(m_adapter ? m_adapter->currentText() : "-");
 
     applyPinStates(m_lastVerdict);
+}
+
+/* ================= chip families + adapters ================= */
+
+void MainWindow::populateChipFamilies()
+{
+    if (!m_chiptype)
+        return;
+    struct Fam { const char *label; const char *key; };
+    static const Fam fams[] = {
+        { "All families",             ""          },
+        { "SPI NOR flash (25xxx)",    "SPI_FLASH" },
+        { "SPI EEPROM (25xxx)",       "25_EEPROM" },
+        { "I2C EEPROM (24xxx)",       "24_EEPROM" },
+        { "Microwire EEPROM (93xxx)", "93_EEPROM" },
+        { "95 series EEPROM",         "95_EEPROM" },
+        { "45 series EEPROM",         "45_EEPROM" }
+    };
+    m_chiptype->blockSignals(true);
+    m_chiptype->clear();
+    for (const Fam &f : fams)
+    {
+        const QString key(f.key);
+        int count = 0;
+        for (int i = 0; i < max_rec; i++)
+            if (chips[i].chipTypeTxt.trimmed() == key)
+                count++;
+        QString label = QString(f.label);
+        if (!key.isEmpty())
+            label += QString("  - %1 chip%2").arg(count).arg(count == 1 ? "" : "s");
+        m_chiptype->addItem(label, key);
+    }
+    m_chiptype->setCurrentIndex(0);
+    m_chiptype->blockSignals(false);
+}
+
+void MainWindow::rebuildManufacturers()
+{
+    if (max_rec <= 0)
+        return;
+    const QString key = m_chiptype ? m_chiptype->currentData().toString() : QString();
+    const QString prev = ui->comboBox_man->currentText();
+    ui->comboBox_man->blockSignals(true);
+    ui->comboBox_man->clear();
+    ui->comboBox_man->addItem("");
+    for (int i = 0; i < max_rec; i++)
+    {
+        if (!key.isEmpty() && chips[i].chipTypeTxt.trimmed() != key)
+            continue;
+        if (ui->comboBox_man->findText(chips[i].chipManuf) == -1)
+            ui->comboBox_man->addItem(chips[i].chipManuf);
+    }
+    int idx = ui->comboBox_man->findText(prev);
+    ui->comboBox_man->setCurrentIndex(idx >= 0 ? idx : 0);
+    ui->comboBox_man->blockSignals(false);
+    on_comboBox_man_currentIndexChanged(ui->comboBox_man->currentIndex());
+}
+
+QString MainWindow::adapterVoltage() const
+{
+    if (!m_adapter)
+        return QString();
+    const QString k = m_adapter->currentData().toString();
+    if (k == "1.2" || k == "1.8" || k == "2.5" || k == "3.3")
+        return k;
+    return QString();
+}
+
+void MainWindow::updateAdapterInfo()
+{
+    if (!m_adapter || !m_adapterInfo)
+        return;
+    const QString key = m_adapter->currentData().toString();
+    QString txt;
+    if (key == "3.3")
+        txt = "Direct connection to the CH341A's 3.3 V outputs. Use with standard 3.3 V SPI NOR flash. "
+              "Do NOT connect 1.8 V parts this way - they can be damaged.";
+    else if (key == "1.8")
+        txt = "1.8 V level adapter. Shifts the CH341A's 3.3 V signals down to 1.8 V and supplies a 1.8 V rail, "
+              "so 1.8 V SPI NOR parts (e.g. W25Q..JW / GD25..E) can be read and written safely. "
+              "The adapter is passive and carries no ID, so it cannot be detected electrically - select it manually.";
+    else if (key == "2.5")
+        txt = "2.5 V level adapter for 2.5 V SPI NOR parts. Passive; select it manually.";
+    else if (key == "1.2")
+        txt = "1.2 V level adapter for 1.2 V SPI NOR parts. Passive; select it manually.";
+    else if (key == "clip8")
+        txt = "SOIC-8 / SOP-8 in-circuit test clip. Power the target board down (or isolate the chip) so the "
+              "programmer is the only SPI master on the bus.";
+    else if (key == "clip16")
+        txt = "SOIC-16 / SOP-16 test clip for 16-pin packages.";
+    else if (key == "dip8")
+        txt = "DIP-8 ZIF socket (use a SOP8 -> DIP8 adapter for SMD parts).";
+    else if (key == "wson8")
+        txt = "WSON-8 / DFN-8 adapter for small 8-pad packages.";
+    m_adapterInfo->setText(txt);
+    if (m_settings)
+        m_settings->setValue("adapter", key);
+    updateChipInfoPage();
+}
+
+void MainWindow::doAdapterCheck()
+{
+    if (m_busy) return;
+    navTo(4);
+    statusCH341 = ch341Configure(0x1a86,0x5512);
+    ch341StatusFlashing();
+    ch341SetStream(currentSpeed);
+    if (statusCH341 != 0)
+    {
+        QMessageBox::about(this, "Error", "Programmer CH341a is not connected!");
+        return;
+    }
+    enum jedec_status st;
+    struct JEDEC j = ch341DetectJedec(&st);
+    ch341Release();
+
+    const QString volt = adapterVoltage();
+    QString msg;
+    Toast::Kind kind = Toast::Info;
+
+    if (st == JEDEC_OK || st == JEDEC_UNSTABLE)
+    {
+        QString chipName, chipVcc;
+        for (int i = 0; i < max_rec; i++)
+        {
+            if (j.man == chips[i].chipJedecIDMan && j.type == chips[i].chipJedecIDDev
+                && j.capacity == chips[i].chipJedecIDCap)
+            {
+                chipName = chips[i].chipName;
+                chipVcc = chips[i].chipVCC;
+                break;
+            }
+        }
+        msg = QString("Chip responds: JEDEC %1 %2 %3%4. Adapter / voltage looks OK.")
+                  .arg(bytePrint(j.man), bytePrint(j.type), bytePrint(j.capacity))
+                  .arg(chipName.isEmpty() ? QString() : QString("  (%1)").arg(chipName));
+        kind = Toast::Success;
+        if (!chipVcc.isEmpty())
+        {
+            msg += QString("\nChip VCC (from database): %1.").arg(chipVcc);
+            if (chipVcc.startsWith("1.8") && volt != "1.8")
+            {
+                msg += "\nWARNING: this is a 1.8 V part but the selected adapter is '"
+                       + m_adapter->currentText() + "'. Fit the 1.8 V adapter.";
+                kind = Toast::Error;
+            }
+            else if (chipVcc.startsWith("3.3") && (volt == "1.8" || volt == "2.5" || volt == "1.2"))
+            {
+                msg += "\nNote: this is a 3.3 V part; a voltage adapter is not required.";
+            }
+        }
+        if (st == JEDEC_UNSTABLE)
+        {
+            msg += "\nNote: readings were unstable - check the adapter / clip seating.";
+            kind = Toast::Error;
+        }
+    }
+    else if (st == JEDEC_BUS_LOW)
+    {
+        msg = "Data line stuck low (00 00 00). Check the adapter / clip wiring, the chip orientation "
+              "and that the chip is powered.";
+        kind = Toast::Error;
+    }
+    else if (st == JEDEC_NO_CHIP)
+    {
+        msg = "No chip response (FF FF FF).\n"
+              "- If this is a 1.8 V / 2.5 V / 1.2 V part, fit the matching level adapter "
+              "(the CH341A outputs 3.3 V and a low-voltage chip will not answer without it).\n"
+              "- Also check the adapter / clip seating, pin 1 orientation and VCC/GND.";
+        kind = Toast::Error;
+    }
+    else
+    {
+        msg = "USB error talking to the programmer. Reconnect the CH341A device.";
+        kind = Toast::Error;
+    }
+
+    msg = QString("[Adapter: %1]\n").arg(m_adapter->currentText()) + msg;
+    m_adapterInfo->setText(msg);
+    appendLog(msg);
+    toastMsg(kind == Toast::Success ? "Adapter check: OK" : "Adapter check: see details", kind);
 }
