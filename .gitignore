@@ -1,0 +1,16 @@
+# build output
+build/
+build_win/
+dist/
+*.o
+*.obj
+*.exe
+*.dll
+*.a
+*.so
+*.zip
+
+# QtCreator / editor
+*.pro.user
+*.autosave
+*~
